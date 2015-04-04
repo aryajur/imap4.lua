@@ -41,14 +41,14 @@ local function assert_arg(n,v)
 	return {
 		type = function(...)
 			local s = type(v)
-			for t in pairs(Set{...}) do if s == t then return end end
+			for t in pairs(Set{...}) do if s == t then return true end end
 			local t = table.concat({...}, "' or `")
-			error(("Error in argument %s: Expected `%s', got `%s'"):format(n, t, s), 2)
+			return nil,("Error in argument %s: Expected `%s', got `%s'"):format(n, t, s), 2
 		end,
 		any = function(...)
-			for u in pairs(Set{...}) do if u == v then return end end
+			for u in pairs(Set{...}) do if u == v then return true end end
 			local u = table.concat({...}, "', `")
-			error(("Error in argument %s: Expected to be one of (`%s'), got `%s'"):format(n, u, tostring(v)), 2)
+			return nil,("Error in argument %s: Expected to be one of (`%s'), got `%s'"):format(n, u, tostring(v)), 2
 		end
 	}
 end
@@ -93,30 +93,48 @@ local function to_table(s)
 			push(stack[stack.i+1])
 		elseif c == '[' then  -- quoted list
 			local k = i
-			i = assert(s:find(']', i+1), "Expected token `]', got EOS")
+			i = s:find(']', i+1)
+			if not i then
+				return nil, "Expected token ']' after postion "..k..", got EOS"
+			end
 			push(s:sub(k+1, i-1))
 		elseif c == '"' then  -- quoted string
 			local k = i
 			repeat
-				i = assert(s:find('"', i+1), "Expected token `\"', got EOS")
+				i = s:find('"', i+1)
+				if not i then
+					return nil, [[Expected token '\"' after position ]]..k..[[, got EOS]]
+				end
 			until s:sub(i-1,i) ~= '\\"'
 			push(s:sub(k+1,i-1))
 		elseif c == '{' then  -- literal
-			local k = assert(s:find('}', i+1), "Expected token `}', got EOS")
+			local k = s:find('}', i+1)
+			if not k then
+				return nil, "Expected token '}' after position "..i..", got EOS"
+			end
 			local n = tonumber(s:sub(i+1,k-1))
 			local sep = s:sub(k+1,k+2)
-			assert(sep == '\r\n', ("Invalid literal: Expected 0x%02x 0x%02x, got 0x%02x 0x%02x"):format(('\r'):byte(1), ('\n'):byte(1), sep:byte(1,-1)))
+			if sep ~= '\r\n' then
+				return nil, ("Invalid literal: Expected 0x%02x 0x%02x, got 0x%02x 0x%02x"):format(('\r'):byte(1), ('\n'):byte(1), sep:byte(1,-1)).." at position "..tostring(k+1)
+			end
 			k, i = k+3, k+3+n+1
-			assert(i <= #s, "Invalid literal: Requested more bytes than available")
+			if i > #s then
+				return nil, "Invalid literal: Requested more bytes than available"
+			end
 			push(s:sub(k,i))
 		elseif c:match('%S') then
 			local k = i
-			i = assert(s:find('[%s%)%[]',i+1), "Expected token <space>, `)' or `[', got EOS") - 1
+			i = s:find('[%s%)%[]',i+1)
+			if not i then
+				return nil, "Expected token <space>, ')' or '[' after position "..k..", got EOS"
+			else
+				i = i-1
+			end
 			push(s:sub(k,i))
 		end
 		i = i + 1
 	end
-	error("Expected token `)', got EOS:\n"..s)
+	return nil,"Expected token `)', got EOS:\n"..s
 end
 
 -- imap4 connection
@@ -125,8 +143,14 @@ IMAP.__index = IMAP
 
 -- constructor
 function IMAP.new(host, port, tls_params)
-	assert_arg(1, host).type('string')
-	assert_arg(2, port).type('number', 'nil')
+	local stat,msg = assert_arg(1, host).type('string')
+	if not stat then
+		return nil,msg
+	end
+	stat,msg = assert_arg(2, port).type('number', 'nil')
+	if not stat then
+		return nil,msg
+	end
 
 	port = port or 143
 	local s = assert(socket.connect(host, port), ("Cannot connect to %s:%u"):format(host, port))
@@ -142,10 +166,14 @@ function IMAP.new(host, port, tls_params)
 	-- check the server greeting before executing the first command
 	imap._do_cmd = function(self, ...)
 		self._do_cmd = IMAP._do_cmd
-		local greeting = imap:_receive():match("^%*%s+(.*)")
+		local stat,msg = imap:_receive()
+		if not stat then
+			return nil,msg
+		end
+		local greeting = stat:match("^%*%s+(.*)")
 		if not greeting then
 			self.socket:close()
-			assert(nil, ("Did not receive greeting from %s:%u"):format(host, port))
+			return nil, ("Did not receive greeting from %s:%u"):format(host, port)
 		end
 		return self:_do_cmd(...)
 	end
@@ -162,7 +190,10 @@ end
 -- standard and close the connection before letting you send any command,
 -- including STARTTLS.
 function IMAP:enabletls(tls_params)
-	assert_arg(1, tls_params).type('table', 'nil')
+	local stat,msg = assert_arg(1, tls_params).type('table', 'nil')
+	if not stat then
+		return nil,msg
+	end
 	tls_params = tls_params or {protocol = 'sslv3'}
 	tls_params.mode = tls_params.mode or 'client'
 
@@ -177,8 +208,12 @@ function IMAP:_receive(mode)
 	repeat
 		local result, errstate, partial = self.socket:receive(mode or '*l')
 		if not result then
-			assert(errstate ~= 'closed', ('Connection to %s:%u closed unexpectedly'):format(self.host, self.port))
-			assert(#partial > 0, ('Connection to %s:%u timed out'):format(self.host, self.port))
+			if errstate == 'closed' then
+				return nil, ('Connection to %s:%u closed unexpectedly'):format(self.host, self.port)
+			end
+			if #partial <=0 then
+				return nil, ('Connection to %s:%u timed out'):format(self.host, self.port)
+			end
 			r[#r+1] = partial
 		end
 		r[#r+1] = result -- does nothing if result is nil
@@ -201,17 +236,26 @@ function IMAP:_do_cmd(cmd, ...)
 	local literal_bytes = 0
 	while true do
 		-- return if there was a tagged response
+		local line,msg,status
 		if literal_bytes > 0 then
-			blocks[#blocks] = blocks[#blocks] .. '\r\n' .. self:_receive(literal_bytes)
+			line,msg = self:_receive(literal_bytes)
+			if not line then
+				return nil,msg
+			end
+			blocks[#blocks] = blocks[#blocks] .. '\r\n' .. line
 			literal_bytes = 0
 		end
 
-		local line = self:_receive()
-		local status, msg = line:match('^'..token..' ([A-Z]+) (.*)$')
+		line,msg = self:_receive()
+		if not line then
+			return nil,msg
+		end
+		status, msg = line:match('^'..token..' ([A-Z]+) (.*)$')
 		if status == 'OK' then
 			break
 		elseif status == 'NO' or status == 'BAD' then
-			error(("Command `%s' failed: %s"):format(cmd:format(...), msg), 3)
+			return nil,("Command '%s' failed: %s"):format(cmd:format(...), msg)
+			--error(("Command `%s' failed: %s"):format(cmd:format(...), msg), 3)
 		end
 
 		local firstchar = line:sub(1,1)
@@ -288,8 +332,7 @@ end
 
 -- plain text login. do not use unless connection is secure (i.e. TLS or SSH tunnel)
 function IMAP:login(user, pass)
-	local res = self:_do_cmd('LOGIN %s %s', user, pass)
-	return res
+	return self:_do_cmd('LOGIN %s %s', user, pass)
 end
 
 -- authenticated state
@@ -313,7 +356,10 @@ end
 
 -- same as IMAP:select, except that the mailbox is set to read-only
 function IMAP:examine(mailbox)
-	local res = self:_do_cmd('SELECT %s', mailbox)
+	local res,msg = self:_do_cmd('SELECT %s', mailbox)
+	if not res then
+		return nil,msg
+	end
 	return parse_select_examine(res), res
 end
 
@@ -384,11 +430,20 @@ end
 -- as defined by RFC3501 Sec 6.3.10:
 -- MESSAGES, RECENT, UIDNEXT, UIDVALIDITY and UNSEEN
 function IMAP:status(mailbox, names)
-	assert_arg(1, mailbox).type('string')
-	assert_arg(2, names).type('string', 'table', 'nil')
+	local res,msg = assert_arg(1, mailbox).type('string')
+	if not res then
+		return nil,msg
+	end
+	res,msg = assert_arg(2, names).type('string', 'table', 'nil')
+	if not res then
+		return nil,msg
+	end
 
 	names = to_list(names or '(MESSAGES RECENT UIDNEXT UIDVALIDITY UNSEEN)')
-	local res = self:_do_cmd('STATUS %s %s', mailbox, names)
+	res,msg = self:_do_cmd('STATUS %s %s', mailbox, names)
+	if not res then
+		return nil,msg
+	end
 
 	local list = to_table(assert(res.STATUS[1]:match('(%b())$'), 'Invalid response'))
 	assert(#list % 2 == 0, "Invalid response size")
@@ -402,10 +457,22 @@ end
 
 -- append a message to a mailbox
 function IMAP:append(mailbox, message, flags, date)
-	assert_arg(1, mailbox).type('string')
-	assert_arg(2, message).type('string')
-	assert_arg(3, flags).type('table', 'string', 'nil')
-	assert_arg(4, date).type('string', 'nil')
+	local stat,msg = assert_arg(1, mailbox).type('string')
+	if not stat then
+		return nil,msg
+	end
+	stat,msg = assert_arg(2, message).type('string')
+	if not stat then
+		return nil,msg
+	end
+	stat,msg = assert_arg(3, flags).type('table', 'string', 'nil')
+	if not stat then
+		return nil,msg
+	end
+	stat,msg = assert_arg(4, date).type('string', 'nil')
+	if not stat then
+		return nil,msg
+	end
 
 	message = ('{%d}\r\n%s'):format(#message, message) -- message literal
 	flags = flags and ' ' .. to_list(flags) or ''
@@ -437,14 +504,24 @@ end
 -- searches the mailbox for messages that match the given searching criteria
 -- See RFC3501 Sec 6.4.4 for details
 function IMAP:search(criteria, charset, uid)
-	assert_arg(1, criteria).type('string', 'table')
-	assert_arg(2, charset).type('string', 'nil')
+	local res,msg = assert_arg(1, criteria).type('string', 'table')
+	if not res then
+		return nil,msg
+	end
+	res,msg = assert_arg(2, charset).type('string', 'nil')
+	if not res then
+		return nil,msg
+	end
 
 	charset = charset and 'CHARSET ' .. charset or ''
 	criteria = to_list(criteria)
 	uid = uid and 'UID ' or ''
 
-	local res = self:_do_cmd('%sSEARCH %s %s', uid, charset, criteria)
+	--res,msg = self:_do_cmd('%sSEARCH %s %s', uid, charset, criteria)
+	res,msg = self:_do_cmd('%sSEARCH %s', uid, criteria)
+	if not res then
+		return nil,msg
+	end
 	local ids = {}
 	for id in res.SEARCH[1]:gmatch('%S+') do
 		ids[#ids+1] = tonumber(id)
@@ -480,21 +557,40 @@ local function parse_fetch(res)
 end
 
 function IMAP:fetch(what, sequence, uid)
-	assert_arg(1, what).type('string', 'table', 'nil')
-	assert_arg(2, sequence).type('string', 'nil')
+	local res,msg = assert_arg(1, what).type('string', 'table', 'nil')
+	if not res then
+		return nil,msg
+	end
+	res,msg = assert_arg(2, sequence).type('string', 'nil')
+	if not res then
+		return nil,msg
+	end
 
-	what = to_list(what or '(UID BODY[HEADER.FIELDS (DATE FROM SUBJECT)])')
+	what = to_list(what or '(BODY[HEADER.FIELDS (DATE FROM SUBJECT)])')
 	sequence = sequence and tostring(sequence) or '1:*'
 	uid = uid and 'UID ' or ''
 
-	local res = self:_do_cmd('%sFETCH %s %s', uid, sequence, what)
-	return parse_fetch(res), res
+	res,msg = self:_do_cmd('%sFETCH %s %s', uid, sequence, what)
+	if res then
+		return parse_fetch(res), res
+	else
+		return nil,msg
+	end
 end
 
 function IMAP:store(mode, flags, sequence, silent, uid)
-	assert_arg(1, mode).any('set', '+', '-')
-	assert_arg(2, flags).type('string', 'table')
-	assert_arg(3, sequence).type('string', 'number')
+	local res,msg = assert_arg(1, mode).any('set', '+', '-')
+	if not res then
+		return nil,msg
+	end
+	res,msg = assert_arg(2, flags).type('string', 'table')
+	if not res then
+		return nil,msg
+	end
+	res,msg = assert_arg(3, sequence).type('string', 'number')
+	if not res then
+		return nil,msg
+	end
 
 	mode = mode == 'set' and '' or mode
 	flags = to_list(flags)
@@ -502,13 +598,23 @@ function IMAP:store(mode, flags, sequence, silent, uid)
 	silent = silent and '.SILENT' or ''
 	uid = uid and 'UID ' or ''
 
-	local res = self:_do_cmd('%sSTORE %s %sFLAGS%s %s', uid, sequence, mode, silent, flags)
-	return parse_fetch(res), res
+	res,msg = self:_do_cmd('%sSTORE %s %sFLAGS%s %s', uid, sequence, mode, silent, flags)
+	if res then
+		return parse_fetch(res), res
+	else
+		return nil,msg
+	end
 end
 
 function IMAP:copy(sequence, mailbox, uid)
-	assert_arg(1, sequence).type('string', 'number')
-	assert_arg(2, mailbox).type('string')
+	local stat,msg = assert_arg(1, sequence).type('string', 'number')
+	if not stat then
+		return nil,msg
+	end
+	stat,msg = assert_arg(2, mailbox).type('string')
+	if not stat then
+		return nil,msg
+	end
 
 	sequence = tostring(sequence)
 	uid = uid and 'UID ' or ''
