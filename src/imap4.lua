@@ -153,7 +153,10 @@ function IMAP.new(host, port, tls_params)
 	end
 
 	port = port or 143
-	local s = assert(socket.connect(host, port), ("Cannot connect to %s:%u"):format(host, port))
+	local s = socket.connect(host, port)
+	if not s then
+		return nil, ("Cannot connect to %s:%u"):format(host, port)
+	end
 	s:settimeout(5)
 
 	local imap = setmetatable({
@@ -198,7 +201,11 @@ function IMAP:enabletls(tls_params)
 	tls_params.mode = tls_params.mode or 'client'
 
 	local ssl = require 'ssl'
-	self.socket = assert(ssl.wrap(self.socket, tls_params))
+	stat,msg = ssl.wrap(self.socket, tls_params)
+	if not stat then
+		return nil,msg
+	end
+	self.socket = stat
 	return self.socket:dohandshake()
 end
 
@@ -225,11 +232,17 @@ end
 function IMAP:_do_cmd(cmd, ...)
 	--assert(self.socket, 'Connection closed')
 	local token = self:next_token()
-
+	local msg
 	-- send request
 	local data  = token .. ' ' .. cmd:format(...) .. '\r\n'
-	local len   = assert(self.socket:send(data))
-	assert(len == #data, 'Broken connection: Could not send all required data')
+	--print(data)
+	local len,msg   = self.socket:send(data)
+	if not len then
+		return nil,msg
+	end
+	if not len == #data then
+		return nil, 'Broken connection: Could not send all required data'
+	end
 
 	-- receive answer line by line and pack into blocks
 	local blocks = {}
@@ -320,7 +333,10 @@ end
 -- start TLS connection. requires luasec. see luasec documentation for
 -- infos on what tls_params should be.
 function IMAP:starttls(tls_params)
-	assert(self:isCapable('STARTTLS'))
+	local stat,msg = self:isCapable('STARTTLS')
+	if not stat then
+		return nil,msg
+	end
 	local res = self:_do_cmd('STARTTLS')
 	self:enabletls(tls_params)
 	return res
@@ -444,9 +460,15 @@ function IMAP:status(mailbox, names)
 	if not res then
 		return nil,msg
 	end
-
-	local list = to_table(assert(res.STATUS[1]:match('(%b())$'), 'Invalid response'))
-	assert(#list % 2 == 0, "Invalid response size")
+	
+	local list = res.STATUS[1]:match('(%b())$')
+	if not list then
+		return nil,"Invalid Response"
+	end
+	list = to_table(list)
+	if not #list % 2 == 0 then
+		return nil, "Invalid response size"
+	end
 
 	local status = {}
 	for i = 1,#list,2 do
@@ -523,8 +545,10 @@ function IMAP:search(criteria, charset, uid)
 		return nil,msg
 	end
 	local ids = {}
-	for id in res.SEARCH[1]:gmatch('%S+') do
-		ids[#ids+1] = tonumber(id)
+	if res.SEARCH[1] then
+		for id in res.SEARCH[1]:gmatch('%S+') do
+			ids[#ids+1] = tonumber(id)
+		end
 	end
 	return ids, res
 end
