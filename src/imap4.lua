@@ -461,7 +461,7 @@ function IMAP:status(mailbox, names)
 		return nil,msg
 	end
 	
-	local list = res.STATUS[1]:match('(%b())$')
+	local list = res.STATUS[1]:match('(%b())%s$')
 	if not list then
 		return nil,"Invalid Response"
 	end
